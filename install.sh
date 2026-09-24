@@ -818,4 +818,4 @@ else
     echo -e "❌ Xray Log Error: $(cat /root/xray/xray.log)"
 fi
 echo "=========================================================="
-menu
+
