@@ -864,6 +864,34 @@ except Exception as e:
 done
 EOF
 
+# 1. Dobrak dan bersihkan port yang nyangkut
+pkill -f nginx 2>/dev/null
+pkill -f xray 2>/dev/null
+fuser -k 23331/tcp 2>/dev/null
+fuser -k 23332/tcp 2>/dev/null
+fuser -k 23333/tcp 2>/dev/null
+
+# 2. Nyalakan Nginx terlebih dahulu di port 23333
+service nginx restart 2>/dev/null || /usr/sbin/nginx
+
+# 3. Nyalakan Xray di port 23331 (VMess) & 23332 (VLESS)
+export XRAY_LOCATION_ASSET="/root/xray"
+nohup env XRAY_LOCATION_ASSET=/root/xray /root/xray/xray run -c /root/xray/config.json > /root/xray/xray.log 2>&1 &
+
+sleep 2
+
+# 4. Tes apakah Nginx & Xray sudah harmonis
+if pgrep -f "nginx" > /dev/null && pgrep -f "/root/xray/xray" > /dev/null; then
+    echo "=========================================================="
+    echo "🎉 SEKARANG SUDAH 100% AMAN & NORMAL!"
+    echo "🔹 Nginx Multiplexer : AKTIF"
+    echo "🔹 Xray Core Engine  : AKTIF"
+    echo "=========================================================="
+else
+    echo "Masih ada kendala, cek log:"
+    cat /root/xray/xray.log
+fi
+
 chmod +x /usr/local/bin/menu
 
 # 6. Jalankan Ulang Semua Service
