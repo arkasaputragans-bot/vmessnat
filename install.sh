@@ -55,7 +55,15 @@ if [ ! -f /root/xray/api_key.txt ]; then
     python3 -c "import secrets; print('MAMZ-' + secrets.token_hex(8).upper())" > /root/xray/api_key.txt
 fi
 
-# 8. Konfigurasi Nginx Multiplexer (VMess 23331, VLESS 23332, API 23330)
+# 8. Setup Otomatis Bot Telegram Admin (Langsung ON di VPS Baru)
+cat << 'EOF' > /root/xray/bot_config.json
+{
+  "token": "7017307321:AAEU_4zjITy2ajbNCx-0mtwUq2ek72iKoa0",
+  "admin_id": 5321845988
+}
+EOF
+
+# 9. Konfigurasi Nginx Multiplexer (VMess 23331, VLESS 23332, API 23330)
 cat << 'EOF' > /etc/nginx/sites-available/default
 server {
     listen 127.0.0.1:23333 default_server;
@@ -87,7 +95,9 @@ server {
 }
 EOF
 
-# 9. Inisialisasi Database User & Config Xray Dual Inbound
+ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
+
+# 10. Inisialisasi Database User & Config Xray Dual Inbound
 FIRST_UUID=$(python3 -c "import uuid; print(uuid.uuid4())")
 EXP_DEFAULT=$(python3 -c "import datetime; print((datetime.datetime.now() + datetime.timedelta(days=365)).strftime('%Y-%m-%d %H:%M:%S'))")
 
@@ -133,7 +143,7 @@ cat << EOF > /root/xray/users.json
 }
 EOF
 
-# 10. Script Pengirim Backup Mandiri (/root/xray/send_backup.py)
+# 11. Script Pengirim Backup Mandiri (/root/xray/send_backup.py)
 cat << 'EOF' > /root/xray/send_backup.py
 import json, os, sys, requests, base64
 
@@ -171,7 +181,7 @@ except Exception as e:
     print(f"❌ Gagal mengirim backup: {str(e)}")
 EOF
 
-# 11. Backend REST API Service Server (/root/xray/api_service.py)
+# 12. Backend REST API Service Server (/root/xray/api_service.py)
 cat << 'EOF' > /root/xray/api_service.py
 # -*- coding: utf-8 -*-
 import json, os, datetime, uuid, subprocess, base64, urllib.parse
@@ -266,14 +276,16 @@ class APIHandler(BaseHTTPRequestHandler):
             with open(USERS_FILE) as f: users = json.load(f)
             with open(CONFIG_FILE) as f: config = json.load(f)
 
-            if username in users:
-                self._send(400, {"status": False, "message": "Username already exists"})
-                return
-
             new_id = str(uuid.uuid4())
             exp_date = (datetime.datetime.now() + datetime.timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
 
             users[username] = {"uuid": new_id, "exp": exp_date, "created": str(datetime.date.today())}
+            
+            # Bersihkan client lama jika ada username sama
+            for i in range(len(config.get('inbounds', []))):
+                cls = config['inbounds'][i]['settings']['clients']
+                config['inbounds'][i]['settings']['clients'] = [c for c in cls if c.get('email') != username]
+
             config['inbounds'][0]['settings']['clients'].append({"id": new_id, "alterId": 0, "email": username})
             if len(config['inbounds']) > 1:
                 config['inbounds'][1]['settings']['clients'].append({"id": new_id, "email": username})
@@ -337,7 +349,7 @@ if __name__ == '__main__':
     server.serve_forever()
 EOF
 
-# 12. Script Bot Telegram & Daemon Auto-Delete Expired (/root/xray/bot_daemon.py)
+# 13. Script Bot Telegram & Daemon Auto-Delete Expired (/root/xray/bot_daemon.py)
 cat << 'EOF' > /root/xray/bot_daemon.py
 # -*- coding: utf-8 -*-
 import requests, json, os, time, datetime, subprocess, threading, urllib.parse, base64
@@ -609,11 +621,7 @@ def main():
                             with open(USERS_FILE) as f: users = json.load(f)
                             with open(CONFIG_FILE) as f: config = json.load(f)
 
-                            if name in users:
-                                send_msg(cid, "❌ Nama user sudah terpakai!"); continue
-
-                            import uuid as uid
-                            new_id = str(uid.uuid4())
+                            new_id = str(uuid.uuid4())
                             now_dt = datetime.datetime.now()
 
                             if state == "trial":
@@ -626,8 +634,14 @@ def main():
                             exp_str = exp_dt.strftime('%Y-%m-%d %H:%M:%S')
 
                             users[name] = {"uuid": new_id, "exp": exp_str, "created": str(datetime.date.today())}
+                            
+                            for i in range(len(config.get('inbounds', []))):
+                                cls = config['inbounds'][i]['settings']['clients']
+                                config['inbounds'][i]['settings']['clients'] = [c for c in cls if c.get('email') != name]
+
                             config['inbounds'][0]['settings']['clients'].append({"id": new_id, "alterId": 0, "email": name})
-                            config['inbounds'][1]['settings']['clients'].append({"id": new_id, "email": name})
+                            if len(config['inbounds']) > 1:
+                                config['inbounds'][1]['settings']['clients'].append({"id": new_id, "email": name})
 
                             with open(CONFIG_FILE, 'w') as f: json.dump(config, f, indent=2)
                             with open(USERS_FILE, 'w') as f: json.dump(users, f, indent=2)
@@ -702,7 +716,7 @@ if __name__ == '__main__':
     main()
 EOF
 
-# 13. Pasang Script Menu CLI Lengkap (/usr/local/bin/menu)
+# 14. Pasang Script Menu CLI Lengkap (/usr/local/bin/menu)
 cat << 'EOF' > /usr/local/bin/menu
 #!/bin/bash
 
@@ -734,7 +748,6 @@ restart_xray() {
     pkill -f "/root/xray/xray" 2>/dev/null
     fuser -k 23331/tcp 2>/dev/null
     fuser -k 23332/tcp 2>/dev/null
-    fuser -k 23333/tcp 2>/dev/null
     service nginx restart 2>/dev/null || /usr/sbin/nginx -s reload 2>/dev/null
     nohup env XRAY_LOCATION_ASSET=/root/xray /root/xray/xray run -c "$CONFIG_FILE" > /root/xray/xray.log 2>&1 &
 }
@@ -841,11 +854,6 @@ while true; do
             read -p "Masukkan Nama User: " new_name
             [ -z "$new_name" ] && { echo -e "❌ Nama kosong!"; sleep 1.5; continue; }
 
-            exists=$(jq --arg u "$new_name" '.inbounds[0].settings.clients[] | select(.email == $u)' "$CONFIG_FILE" 2>/dev/null)
-            if [ -n "$exists" ]; then
-                echo -e "❌ User '$new_name' sudah ada!"; read -p "Tekan Enter..."; continue
-            fi
-
             if [ "$is_trial" == "1" ]; then
                 echo "Pilih Durasi Trial:"
                 echo " [1] 1 Jam"
@@ -863,6 +871,10 @@ while true; do
 
             new_id=$(python3 -c "import uuid; print(uuid.uuid4())")
 
+            # Bersihkan user lama jika ada username sama
+            jq --arg u "$new_name" '.inbounds[0].settings.clients |= map(select(.email != $u)) | .inbounds[1].settings.clients |= map(select(.email != $u))' "$CONFIG_FILE" > /tmp/c.json && mv /tmp/c.json "$CONFIG_FILE"
+
+            # Masukkan ke Inbound VMess & VLESS
             jq --arg u "$new_name" --arg id "$new_id" '.inbounds[0].settings.clients += [{"id": $id, "alterId": 0, "email": $u}] | .inbounds[1].settings.clients += [{"id": $id, "email": $u}]' "$CONFIG_FILE" > /tmp/c.json && mv /tmp/c.json "$CONFIG_FILE"
             jq --arg u "$new_name" --arg id "$new_id" --arg exp "$exp_date" --arg cr "$(date +%Y-%m-%d)" '.[$u] = {"uuid": $id, "exp": $exp, "created": $cr}' "$USERS_FILE" > /tmp/u.json && mv /tmp/u.json "$USERS_FILE"
 
@@ -1116,7 +1128,7 @@ EOF
 
 chmod +x /usr/local/bin/menu
 
-# 14. Nyalakan Semua Service Awal
+# 15. Nyalakan Semua Service Awal
 service nginx restart 2>/dev/null || /usr/sbin/nginx
 export XRAY_LOCATION_ASSET="/root/xray"
 nohup env XRAY_LOCATION_ASSET=/root/xray /root/xray/xray run -c /root/xray/config.json > /root/xray/xray.log 2>&1 &
