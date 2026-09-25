@@ -148,10 +148,8 @@ try:
         
     b64_str = base64.b64encode(json.dumps(b_data).encode()).decode()
     
-    # Kirim Dokumen
     requests.post(f"https://api.telegram.org/bot{token}/sendDocument", data={"chat_id": admin_id, "caption": "📦 *File Backup Data VMess & VLESS*"}, files={"document": open(b_file, "rb")}, timeout=30)
     
-    # Kirim Kode Base64
     caption_b64 = "📋 *KODE BACKUP BASE64 (Untuk Terminal)*\n\nSalin teks ini untuk menu terminal [9] -> [3]:\n\n`" + b64_str + "`"
     requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": admin_id, "text": caption_b64, "parse_mode": "Markdown"}, timeout=30)
     
@@ -246,7 +244,6 @@ def check_expired_and_cleanup_loop(token=None, admin_id=None):
                             msg = f"⚠️ *Notifikasi Kadaluarsa:*\nAkun `{exp_u}` telah kadaluarsa ({today_str}) dan otomatis dihapus."
                             requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": admin_id, "text": msg, "parse_mode": "Markdown"})
 
-            # Auto Clean RAM Harian
             current_day = now_dt.day
             if current_day != last_clean_day:
                 last_clean_day = current_day
