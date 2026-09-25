@@ -1,6 +1,6 @@
 #!/bin/bash
 # ====================================================================
-# MASTER INSTALLER ULTIMATE (VLESS + VMESS + IP INFO + BOT + SPEEDTEST)
+# MASTER INSTALLER ULTIMATE (VLESS + VMESS + API STORE + BOT + SPEEDTEST)
 # ====================================================================
 
 # 1. Konfigurasi Locale UTF-8 Sistem
@@ -24,6 +24,8 @@ pkill -9 -f "nginx" 2>/dev/null
 pkill -9 -f "xray" 2>/dev/null
 pkill -9 -f "cloudflared" 2>/dev/null
 pkill -9 -f "bot_daemon.py" 2>/dev/null
+pkill -9 -f "api_service.py" 2>/dev/null
+fuser -k -9 23330/tcp 2>/dev/null
 fuser -k -9 23331/tcp 2>/dev/null
 fuser -k -9 23332/tcp 2>/dev/null
 fuser -k -9 23333/tcp 2>/dev/null
@@ -48,7 +50,12 @@ echo "⏳ Mengunduh Cloudflared Tunnel..."
 curl -L -k "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}" -o /root/cloudflared
 chmod +x /root/cloudflared
 
-# 7. Konfigurasi Nginx Multiplexer (Jalur VMess & VLESS)
+# 7. Generate API Key Otomatis untuk Bot Jualan
+if [ ! -f /root/xray/api_key.txt ]; then
+    python3 -c "import secrets; print('MAMZ-' + secrets.token_hex(8).upper())" > /root/xray/api_key.txt
+fi
+
+# 8. Konfigurasi Nginx Multiplexer (VMess 23331, VLESS 23332, API 23330)
 cat << 'EOF' > /etc/nginx/sites-available/default
 server {
     listen 127.0.0.1:23333 default_server;
@@ -71,10 +78,16 @@ server {
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
     }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:23330/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
 }
 EOF
 
-# 8. Inisialisasi Database User & Config Xray Dual Inbound (VMess 23331 & VLESS 23332)
+# 9. Inisialisasi Database User & Config Xray Dual Inbound
 FIRST_UUID=$(python3 -c "import uuid; print(uuid.uuid4())")
 EXP_DEFAULT=$(python3 -c "import datetime; print((datetime.datetime.now() + datetime.timedelta(days=365)).strftime('%Y-%m-%d %H:%M:%S'))")
 
@@ -120,7 +133,7 @@ cat << EOF > /root/xray/users.json
 }
 EOF
 
-# 9. Script Pengirim Backup Mandiri (/root/xray/send_backup.py)
+# 10. Script Pengirim Backup Mandiri (/root/xray/send_backup.py)
 cat << 'EOF' > /root/xray/send_backup.py
 import json, os, sys, requests, base64
 
@@ -158,18 +171,176 @@ except Exception as e:
     print(f"❌ Gagal mengirim backup: {str(e)}")
 EOF
 
-# 10. Script Bot Telegram & Daemon Auto-Delete Expired (/root/xray/bot_daemon.py)
+# 11. Backend REST API Service Server (/root/xray/api_service.py)
+cat << 'EOF' > /root/xray/api_service.py
+# -*- coding: utf-8 -*-
+import json, os, datetime, uuid, subprocess, base64, urllib.parse
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+CONFIG_FILE = "/root/xray/config.json"
+USERS_FILE = "/root/xray/users.json"
+KEY_FILE = "/root/xray/api_key.txt"
+DOMAIN_FILE = "/root/xray/domain.txt"
+MODE_FILE = "/root/xray/mode.txt"
+QUICK_LOG = "/root/xray/quick_tunnel.log"
+
+def get_secret():
+    if os.path.exists(KEY_FILE):
+        with open(KEY_FILE) as f: return f.read().strip()
+    return "MAMZ-RAILWAY-DEFAULT"
+
+def get_domain():
+    mode = "quick"
+    if os.path.exists(MODE_FILE):
+        with open(MODE_FILE) as f: mode = f.read().strip()
+    if mode == "custom" and os.path.exists(DOMAIN_FILE):
+        with open(DOMAIN_FILE) as f: return f.read().strip()
+    if os.path.exists(QUICK_LOG):
+        try:
+            with open(QUICK_LOG) as f:
+                for l in reversed(f.readlines()):
+                    if "trycloudflare.com" in l:
+                        import re
+                        m = re.search(r'https://[a-zA-Z0-9.-]+\.trycloudflare\.com', l)
+                        if m: return m.group(0).replace('https://', '')
+        except: pass
+    return "Domain-Belum-Siap"
+
+def restart_xray():
+    subprocess.run("pkill -f '/root/xray/xray'", shell=True)
+    subprocess.run("fuser -k 23331/tcp 2>/dev/null", shell=True)
+    subprocess.run("fuser -k 23332/tcp 2>/dev/null", shell=True)
+    subprocess.Popen("env XRAY_LOCATION_ASSET=/root/xray /root/xray/xray run -c /root/xray/config.json > /root/xray/xray.log 2>&1", shell=True)
+
+class APIHandler(BaseHTTPRequestHandler):
+    def _send(self, code, data):
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode('utf-8'))
+
+    def _auth(self):
+        token = self.headers.get("Authorization", "").replace("Bearer ", "").strip()
+        return token == get_secret()
+
+    def do_GET(self):
+        path = urllib.parse.urlparse(self.path).path
+        if path in ["/status", "/api/status"]:
+            ucount = 0
+            if os.path.exists(USERS_FILE):
+                try:
+                    with open(USERS_FILE) as f: ucount = len(json.load(f))
+                except: pass
+            self._send(200, {
+                "status": True,
+                "domain": get_domain(),
+                "total_accounts": ucount,
+                "ports": {"http": 80, "tls": 443}
+            })
+        else:
+            self._send(404, {"status": False, "message": "Not Found"})
+
+    def do_POST(self):
+        if not self._auth():
+            self._send(401, {"status": False, "message": "Unauthorized (API Key Salah)"})
+            return
+
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length) if length > 0 else b'{}'
+        try:
+            data = json.loads(body.decode('utf-8'))
+        except:
+            data = {}
+
+        path = urllib.parse.urlparse(self.path).path
+
+        if path in ["/create", "/api/create"]:
+            username = data.get("username", "").strip()
+            days = int(data.get("exp", 30))
+            protocol = data.get("protocol", "vmess").lower()
+
+            if not username:
+                self._send(400, {"status": False, "message": "Username is required"})
+                return
+
+            with open(USERS_FILE) as f: users = json.load(f)
+            with open(CONFIG_FILE) as f: config = json.load(f)
+
+            if username in users:
+                self._send(400, {"status": False, "message": "Username already exists"})
+                return
+
+            new_id = str(uuid.uuid4())
+            exp_date = (datetime.datetime.now() + datetime.timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+
+            users[username] = {"uuid": new_id, "exp": exp_date, "created": str(datetime.date.today())}
+            config['inbounds'][0]['settings']['clients'].append({"id": new_id, "alterId": 0, "email": username})
+            if len(config['inbounds']) > 1:
+                config['inbounds'][1]['settings']['clients'].append({"id": new_id, "email": username})
+
+            with open(CONFIG_FILE, 'w') as f: json.dump(config, f, indent=2)
+            with open(USERS_FILE, 'w') as f: json.dump(users, f, indent=2)
+            restart_xray()
+
+            domain = get_domain()
+            vmess_cfg = {
+                "v": "2", "ps": username, "add": domain, "port": "443",
+                "id": new_id, "aid": "0", "scy": "auto", "net": "ws",
+                "type": "none", "host": domain, "path": "/vmess-railway",
+                "tls": "tls", "sni": domain
+            }
+            vmess_link = "vmess://" + base64.b64encode(json.dumps(vmess_cfg).encode()).decode()
+            vless_link = f"vless://{new_id}@{domain}:443?path=%2Fvless-railway&security=tls&encryption=none&type=ws&sni={domain}#{urllib.parse.quote(username)}"
+
+            self._send(200, {
+                "status": True,
+                "data": {
+                    "username": username,
+                    "uuid": new_id,
+                    "domain": domain,
+                    "port": 443,
+                    "exp": exp_date,
+                    "vmess_link": vmess_link,
+                    "vless_link": vless_link,
+                    "active_link": vless_link if protocol == "vless" else vmess_link
+                }
+            })
+
+        elif path in ["/renew", "/api/renew"]:
+            username = data.get("username", "").strip()
+            days = int(data.get("exp", 30))
+
+            with open(USERS_FILE) as f: users = json.load(f)
+            if username not in users:
+                self._send(404, {"status": False, "message": "User not found"})
+                return
+
+            cur_exp = users[username].get('exp', '')
+            try:
+                base_dt = max(datetime.datetime.strptime(cur_exp, '%Y-%m-%d %H:%M:%S'), datetime.datetime.now())
+            except:
+                base_dt = datetime.datetime.now()
+
+            new_exp = (base_dt + datetime.timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+            users[username]['exp'] = new_exp
+            with open(USERS_FILE, 'w') as f: json.dump(users, f, indent=2)
+
+            self._send(200, {"status": True, "message": f"Renewed until {new_exp}", "exp": new_exp})
+        else:
+            self._send(404, {"status": False, "message": "Not Found"})
+
+    def log_message(self, format, *args):
+        return
+
+if __name__ == '__main__':
+    server = HTTPServer(('127.0.0.1', 23330), APIHandler)
+    server.serve_forever()
+EOF
+
+# 12. Script Bot Telegram & Daemon Auto-Delete Expired (/root/xray/bot_daemon.py)
 cat << 'EOF' > /root/xray/bot_daemon.py
 # -*- coding: utf-8 -*-
-import requests
-import json
-import os
-import time
-import datetime
-import subprocess
-import threading
-import urllib.parse
-import base64
+import requests, json, os, time, datetime, subprocess, threading, urllib.parse, base64
 
 CONFIG_FILE = "/root/xray/config.json"
 USERS_FILE = "/root/xray/users.json"
@@ -531,7 +702,7 @@ if __name__ == '__main__':
     main()
 EOF
 
-# 11. Pasang Script Menu CLI Lengkap Dengan Info IP & Lokasi (/usr/local/bin/menu)
+# 13. Pasang Script Menu CLI Lengkap (/usr/local/bin/menu)
 cat << 'EOF' > /usr/local/bin/menu
 #!/bin/bash
 
@@ -539,6 +710,7 @@ export XRAY_LOCATION_ASSET="/root/xray"
 CONFIG_FILE="/root/xray/config.json"
 USERS_FILE="/root/xray/users.json"
 BOT_CFG="/root/xray/bot_config.json"
+KEY_FILE="/root/xray/api_key.txt"
 MODE_FILE="/root/xray/mode.txt"
 DOMAIN_FILE="/root/xray/domain.txt"
 QUICK_LOG="/root/xray/quick_tunnel.log"
@@ -562,6 +734,7 @@ restart_xray() {
     pkill -f "/root/xray/xray" 2>/dev/null
     fuser -k 23331/tcp 2>/dev/null
     fuser -k 23332/tcp 2>/dev/null
+    fuser -k 23333/tcp 2>/dev/null
     service nginx restart 2>/dev/null || /usr/sbin/nginx -s reload 2>/dev/null
     nohup env XRAY_LOCATION_ASSET=/root/xray /root/xray/xray run -c "$CONFIG_FILE" > /root/xray/xray.log 2>&1 &
 }
@@ -569,6 +742,12 @@ restart_xray() {
 restart_bot() {
     pkill -f "bot_daemon.py" 2>/dev/null
     nohup python3 /root/xray/bot_daemon.py > /root/xray/bot.log 2>&1 &
+}
+
+restart_api() {
+    pkill -f "api_service.py" 2>/dev/null
+    fuser -k 23330/tcp 2>/dev/null
+    nohup python3 /root/xray/api_service.py > /root/xray/api.log 2>&1 &
 }
 
 get_current_domain() {
@@ -616,9 +795,11 @@ while true; do
     pgrep -f "/root/xray/xray" > /dev/null && STAT_X="\033[1;32m[ AKTIF ]\033[0m" || STAT_X="\033[1;31m[ MATI ]\033[0m"
     pgrep -f "cloudflared" > /dev/null && STAT_T="\033[1;32m[ AKTIF ]\033[0m" || STAT_T="\033[1;31m[ MATI ]\033[0m"
     pgrep -f "bot_daemon.py" > /dev/null && STAT_B="\033[1;32m[ AKTIF ]\033[0m" || STAT_B="\033[1;33m[ NONAKTIF ]\033[0m"
+    pgrep -f "api_service.py" > /dev/null && STAT_A="\033[1;32m[ AKTIF ]\033[0m" || STAT_A="\033[1;31m[ MATI ]\033[0m"
 
     get_server_info
     IFS='|' read -r S_IP S_LOC S_ISP < /tmp/server_info.txt
+    MY_AUTH=$(cat "$KEY_FILE" 2>/dev/null || echo "Belum Ada")
 
     echo ""
     echo -e "\033[1;34m=====================================================\033[0m"
@@ -626,6 +807,8 @@ while true; do
     echo -e "\033[1;34m=====================================================\033[0m"
     echo -e " 🌐 IP Server    : \033[1;32m$S_IP\033[0m (\033[1;36m$S_LOC\033[0m)"
     echo -e " 🏢 Provider/ISP : \033[1;37m$S_ISP\033[0m"
+    echo -e " 🔑 API Auth Key : \033[1;33m$MY_AUTH\033[0m"
+    echo -e " 🔌 API Service  : $STAT_A"
     echo -e " 🔹 Xray Service : $STAT_X (VMess & VLESS)"
     echo -e " 🔹 Cloudflare   : $STAT_T (Mode: \033[1;35m$CUR_MODE\033[0m)"
     echo -e " 🔹 Bot Telegram : $STAT_B (Auto-Backup: \033[1;32m1 Jam\033[0m)"
@@ -893,6 +1076,7 @@ except Exception as e:
             echo "Merestart semua service..."
             restart_xray
             restart_bot
+            restart_api
             CUR_MODE=$(cat "$MODE_FILE" 2>/dev/null || echo "quick")
             pkill -f "cloudflared" 2>/dev/null
             if [ "$CUR_MODE" == "custom" ]; then
@@ -913,6 +1097,8 @@ except Exception as e:
                 pkill -9 -f "xray" 2>/dev/null
                 pkill -9 -f "cloudflared" 2>/dev/null
                 pkill -9 -f "bot_daemon.py" 2>/dev/null
+                pkill -9 -f "api_service.py" 2>/dev/null
+                fuser -k -9 23330/tcp 2>/dev/null
                 fuser -k -9 23331/tcp 2>/dev/null
                 fuser -k -9 23332/tcp 2>/dev/null
                 fuser -k -9 23333/tcp 2>/dev/null
@@ -930,13 +1116,16 @@ EOF
 
 chmod +x /usr/local/bin/menu
 
-# 12. Nyalakan Service Awal
+# 14. Nyalakan Semua Service Awal
 service nginx restart 2>/dev/null || /usr/sbin/nginx
 export XRAY_LOCATION_ASSET="/root/xray"
 nohup env XRAY_LOCATION_ASSET=/root/xray /root/xray/xray run -c /root/xray/config.json > /root/xray/xray.log 2>&1 &
 echo "quick" > /root/xray/mode.txt
 nohup /root/cloudflared tunnel --url http://127.0.0.1:23333 --logfile /root/xray/quick_tunnel.log > /dev/null 2>&1 &
 nohup python3 /root/xray/bot_daemon.py > /root/xray/bot.log 2>&1 &
+pkill -f "api_service.py" 2>/dev/null
+fuser -k 23330/tcp 2>/dev/null
+nohup python3 /root/xray/api_service.py > /root/xray/api.log 2>&1 &
 
 sleep 2
 
