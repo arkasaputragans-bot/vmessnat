@@ -1,6 +1,6 @@
 #!/bin/bash
 # ====================================================================
-# MASTER INSTALLER ULTIMATE (VLESS + VMESS + API STORE + BOT + SPEEDTEST)
+# MASTER INSTALLER FINAL ULTIMATE (VMESS + VLESS + STORE API + BOT + EXP)
 # ====================================================================
 
 # 1. Konfigurasi Locale UTF-8 Sistem
@@ -10,18 +10,18 @@ export PYTHONIOENCODING=utf-8
 echo "export LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8" >> /etc/profile
 echo "export LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8" >> /root/.bashrc
 
-# 2. Update Sistem & Install Paket Pendukung
+# 2. Update Sistem & Install Paket Pendukung (Anti Stdin Truncate)
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
+apt-get update -y < /dev/null
 apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
-    ca-certificates curl wget unzip jq procps nano psmisc qrencode python3 python3-pip nginx speedtest-cli
+    ca-certificates curl wget unzip jq procps nano psmisc qrencode python3 python3-pip nginx speedtest-cli < /dev/null
 
 pip3 install speedtest-cli requests --break-system-packages 2>/dev/null || pip3 install speedtest-cli requests
 
 # 3. Bersihkan Port & Matikan Semua Proses Lama (Anti-Bentrok)
 service nginx stop 2>/dev/null
 pkill -9 -f "nginx" 2>/dev/null
-pkill -9 -f "xray" 2>/dev/null
+pkill -9 -f "/root/xray/xray run" 2>/dev/null
 pkill -9 -f "cloudflared" 2>/dev/null
 pkill -9 -f "bot_daemon.py" 2>/dev/null
 pkill -9 -f "api_service.py" 2>/dev/null
@@ -56,12 +56,14 @@ if [ ! -f /root/xray/api_key.txt ]; then
 fi
 
 # 8. Setup Otomatis Bot Telegram Admin (Langsung ON di VPS Baru)
+if [ ! -f /root/xray/bot_config.json ]; then
 cat << 'EOF' > /root/xray/bot_config.json
 {
   "token": "7017307321:AAEU_4zjITy2ajbNCx-0mtwUq2ek72iKoa0",
   "admin_id": 5321845988
 }
 EOF
+fi
 
 # 9. Konfigurasi Nginx Multiplexer (VMess 23331, VLESS 23332, API 23330)
 cat << 'EOF' > /etc/nginx/sites-available/default
@@ -143,7 +145,47 @@ cat << EOF > /root/xray/users.json
 }
 EOF
 
-# 11. Script Pengirim Backup Mandiri (/root/xray/send_backup.py)
+# 11. Script Hapus Akun Handal Berbasis Python (/root/xray/del_user.py)
+cat << 'EOF' > /root/xray/del_user.py
+import json, os, sys, subprocess
+
+CONFIG_FILE = "/root/xray/config.json"
+USERS_FILE = "/root/xray/users.json"
+
+if len(sys.argv) < 2:
+    print("❌ Masukkan nama user yang ingin dihapus!")
+    sys.exit(1)
+
+target = sys.argv[1].strip()
+
+try:
+    with open(CONFIG_FILE) as f: config = json.load(f)
+    with open(USERS_FILE) as f: users = json.load(f)
+
+    # Hapus dari semua Inbounds (VMess & VLESS)
+    for i in range(len(config.get('inbounds', []))):
+        cls = config['inbounds'][i]['settings'].get('clients', [])
+        config['inbounds'][i]['settings']['clients'] = [c for c in cls if c.get('email') != target]
+
+    if target in users:
+        del users[target]
+
+    with open(CONFIG_FILE, 'w') as f: json.dump(config, f, indent=2)
+    with open(USERS_FILE, 'w') as f: json.dump(users, f, indent=2)
+
+    # Paksa bunuh Xray lama & bersihkan port internal
+    subprocess.run("pkill -9 -f '/root/xray/xray run'", shell=True)
+    subprocess.run("fuser -k -9 23331/tcp 23332/tcp 2>/dev/null", shell=True)
+    
+    # Nyalakan Xray baru
+    subprocess.Popen("env XRAY_LOCATION_ASSET=/root/xray /root/xray/xray run -c /root/xray/config.json > /root/xray/xray.log 2>&1", shell=True)
+
+    print(f"✅ Akun '{target}' BERHASIL DIHAPUS TOTAL dari VMess & VLESS!")
+except Exception as e:
+    print(f"❌ Gagal menghapus: {str(e)}")
+EOF
+
+# 12. Script Pengirim Backup Mandiri (/root/xray/send_backup.py)
 cat << 'EOF' > /root/xray/send_backup.py
 import json, os, sys, requests, base64
 
@@ -181,7 +223,7 @@ except Exception as e:
     print(f"❌ Gagal mengirim backup: {str(e)}")
 EOF
 
-# 12. Backend REST API Service Server (/root/xray/api_service.py)
+# 13. Backend REST API Service Server (/root/xray/api_service.py)
 cat << 'EOF' > /root/xray/api_service.py
 # -*- coding: utf-8 -*-
 import json, os, datetime, uuid, subprocess, base64, urllib.parse
@@ -217,9 +259,8 @@ def get_domain():
     return "Domain-Belum-Siap"
 
 def restart_xray():
-    subprocess.run("pkill -f '/root/xray/xray'", shell=True)
-    subprocess.run("fuser -k 23331/tcp 2>/dev/null", shell=True)
-    subprocess.run("fuser -k 23332/tcp 2>/dev/null", shell=True)
+    subprocess.run("pkill -9 -f '/root/xray/xray run'", shell=True)
+    subprocess.run("fuser -k -9 23331/tcp 23332/tcp 2>/dev/null", shell=True)
     subprocess.Popen("env XRAY_LOCATION_ASSET=/root/xray /root/xray/xray run -c /root/xray/config.json > /root/xray/xray.log 2>&1", shell=True)
 
 class APIHandler(BaseHTTPRequestHandler):
@@ -349,7 +390,7 @@ if __name__ == '__main__':
     server.serve_forever()
 EOF
 
-# 13. Script Bot Telegram & Daemon Auto-Delete Expired (/root/xray/bot_daemon.py)
+# 14. Script Bot Telegram & Daemon Auto-Delete Expired (/root/xray/bot_daemon.py)
 cat << 'EOF' > /root/xray/bot_daemon.py
 # -*- coding: utf-8 -*-
 import requests, json, os, time, datetime, subprocess, threading, urllib.parse, base64
@@ -379,9 +420,8 @@ def get_domain():
     return "Domain-Belum-Siap"
 
 def restart_xray():
-    subprocess.run("pkill -f '/root/xray/xray'", shell=True)
-    subprocess.run("fuser -k 23331/tcp 2>/dev/null", shell=True)
-    subprocess.run("fuser -k 23332/tcp 2>/dev/null", shell=True)
+    subprocess.run("pkill -9 -f '/root/xray/xray run'", shell=True)
+    subprocess.run("fuser -k -9 23331/tcp 23332/tcp 2>/dev/null", shell=True)
     subprocess.Popen("env XRAY_LOCATION_ASSET=/root/xray /root/xray/xray run -c /root/xray/config.json > /root/xray/xray.log 2>&1", shell=True)
 
 def generate_vmess_link(name, uuid, domain):
@@ -693,19 +733,8 @@ def main():
                         user_state[cid] = None
                         try:
                             name = text
-                            with open(USERS_FILE) as f: users = json.load(f)
-                            with open(CONFIG_FILE) as f: config = json.load(f)
-                            if name not in users:
-                                send_msg(cid, "❌ User tidak ditemukan!"); continue
-                            del users[name]
-                            for i in range(len(config.get('inbounds', []))):
-                                cls = config['inbounds'][i]['settings']['clients']
-                                config['inbounds'][i]['settings']['clients'] = [c for c in cls if c.get('email') != name]
-                            
-                            with open(CONFIG_FILE, 'w') as f: json.dump(config, f, indent=2)
-                            with open(USERS_FILE, 'w') as f: json.dump(users, f, indent=2)
-                            restart_xray()
-                            send_msg(cid, f"✅ Akun `{name}` berhasil dihapus!")
+                            subprocess.run(f"python3 /root/xray/del_user.py '{name}'", shell=True)
+                            send_msg(cid, f"✅ Akun `{name}` berhasil dihapus permanen!")
                         except Exception as e:
                             send_msg(cid, f"❌ Error: {str(e)}")
 
@@ -716,7 +745,7 @@ if __name__ == '__main__':
     main()
 EOF
 
-# 14. Pasang Script Menu CLI Lengkap (/usr/local/bin/menu)
+# 15. Pasang Script Menu CLI Lengkap (/usr/local/bin/menu)
 cat << 'EOF' > /usr/local/bin/menu
 #!/bin/bash
 
@@ -745,10 +774,9 @@ get_server_info() {
 }
 
 restart_xray() {
-    pkill -f "/root/xray/xray" 2>/dev/null
-    fuser -k 23331/tcp 2>/dev/null
-    fuser -k 23332/tcp 2>/dev/null
-    service nginx restart 2>/dev/null || /usr/sbin/nginx -s reload 2>/dev/null
+    pkill -9 -f "/root/xray/xray run" 2>/dev/null
+    fuser -k -9 23331/tcp 23332/tcp 2>/dev/null
+    service nginx restart 2>/dev/null || /usr/sbin/nginx -s reload 2>/dev/null || /usr/sbin/nginx 2>/dev/null
     nohup env XRAY_LOCATION_ASSET=/root/xray /root/xray/xray run -c "$CONFIG_FILE" > /root/xray/xray.log 2>&1 &
 }
 
@@ -759,7 +787,7 @@ restart_bot() {
 
 restart_api() {
     pkill -f "api_service.py" 2>/dev/null
-    fuser -k 23330/tcp 2>/dev/null
+    fuser -k -9 23330/tcp 2>/dev/null
     nohup python3 /root/xray/api_service.py > /root/xray/api.log 2>&1 &
 }
 
@@ -805,7 +833,7 @@ while true; do
     CUR_DOM=$(get_current_domain)
     TOTAL_ACC=$(jq '.inbounds[0].settings.clients | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
 
-    pgrep -f "/root/xray/xray" > /dev/null && STAT_X="\033[1;32m[ AKTIF ]\033[0m" || STAT_X="\033[1;31m[ MATI ]\033[0m"
+    pgrep -f "/root/xray/xray run" > /dev/null && STAT_X="\033[1;32m[ AKTIF ]\033[0m" || STAT_X="\033[1;31m[ MATI ]\033[0m"
     pgrep -f "cloudflared" > /dev/null && STAT_T="\033[1;32m[ AKTIF ]\033[0m" || STAT_T="\033[1;31m[ MATI ]\033[0m"
     pgrep -f "bot_daemon.py" > /dev/null && STAT_B="\033[1;32m[ AKTIF ]\033[0m" || STAT_B="\033[1;33m[ NONAKTIF ]\033[0m"
     pgrep -f "api_service.py" > /dev/null && STAT_A="\033[1;32m[ AKTIF ]\033[0m" || STAT_A="\033[1;31m[ MATI ]\033[0m"
@@ -830,7 +858,7 @@ while true; do
     echo -e "\033[1;34m=====================================================\033[0m"
     echo -e " [1] Buat Akun Normal (Durasi Hari)"
     echo -e " [2] \033[1;33mBuat Akun TRIAL (1 Jam / 24 Jam)\033[0m"
-    echo -e " [3] Hapus Akun"
+    echo -e " [3] \033[1;31mHapus Akun (Permanen VMess & VLESS)\033[0m"
     echo -e " [4] Perpanjang Masa Aktif Akun (Renew)"
     echo -e " [5] Lihat Detail Akun, Sisa Waktu, Link & QR Code"
     echo -e " [6] Ganti / Custom UUID Akun"
@@ -871,10 +899,10 @@ while true; do
 
             new_id=$(python3 -c "import uuid; print(uuid.uuid4())")
 
-            # Bersihkan user lama jika ada username sama
+            # Bersihkan jika ada nama sama sebelumnya
             jq --arg u "$new_name" '.inbounds[0].settings.clients |= map(select(.email != $u)) | .inbounds[1].settings.clients |= map(select(.email != $u))' "$CONFIG_FILE" > /tmp/c.json && mv /tmp/c.json "$CONFIG_FILE"
 
-            # Masukkan ke Inbound VMess & VLESS
+            # Daftarkan ke VMess & VLESS
             jq --arg u "$new_name" --arg id "$new_id" '.inbounds[0].settings.clients += [{"id": $id, "alterId": 0, "email": $u}] | .inbounds[1].settings.clients += [{"id": $id, "email": $u}]' "$CONFIG_FILE" > /tmp/c.json && mv /tmp/c.json "$CONFIG_FILE"
             jq --arg u "$new_name" --arg id "$new_id" --arg exp "$exp_date" --arg cr "$(date +%Y-%m-%d)" '.[$u] = {"uuid": $id, "exp": $exp, "created": $cr}' "$USERS_FILE" > /tmp/u.json && mv /tmp/u.json "$USERS_FILE"
 
@@ -909,15 +937,14 @@ while true; do
             echo -e "\n--- HAPUS AKUN ---"
             mapfile -t list_u < <(jq -r '.inbounds[0].settings.clients[].email' "$CONFIG_FILE")
             for i in "${!list_u[@]}"; do echo " [$((i+1))] ${list_u[$i]}"; done
-            read -p "Pilih Nomor: " d_idx
+            read -p "Pilih Nomor yang ingin dihapus: " d_idx
             if [ -n "$d_idx" ] && [ "$d_idx" -le "${#list_u[@]}" ] && [ "$d_idx" -ge 1 ]; then
                 target="${list_u[$((d_idx-1))]}"
-                jq --arg u "$target" '.inbounds[0].settings.clients |= map(select(.email != $u)) | .inbounds[1].settings.clients |= map(select(.email != $u))' "$CONFIG_FILE" > /tmp/c.json && mv /tmp/c.json "$CONFIG_FILE"
-                jq --arg u "$target" 'del(.[$u])' "$USERS_FILE" > /tmp/u.json && mv /tmp/u.json "$USERS_FILE"
-                restart_xray
-                echo "✅ Akun '$target' berhasil dihapus!"
+                python3 /root/xray/del_user.py "$target"
+            else
+                echo "❌ Pilihan tidak valid."
             fi
-            read -p "Tekan Enter..." dummy
+            read -p "Tekan Enter untuk kembali..." dummy
             ;;
 
         4)
@@ -993,8 +1020,16 @@ print((base + datetime.timedelta(days=$add_days)).strftime('%Y-%m-%d %H:%M:%S'))
             read -p "Pilih Nomor: " c_idx
             if [ -n "$c_idx" ] && [ "$c_idx" -le "${#list_u[@]}" ] && [ "$c_idx" -ge 1 ]; then
                 target="${list_u[$((c_idx-1))]}"
-                read -p "UUID Baru (Enter untuk auto): " custom_uuid
-                [ -z "$custom_uuid" ] && custom_uuid=$(python3 -c "import uuid; print(uuid.uuid4())")
+                read -p "UUID Baru (Enter untuk auto random): " custom_uuid
+                if [ -n "$custom_uuid" ]; then
+                    if ! [[ "$custom_uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+                        echo -e "\n❌ Format UUID Tidak Valid!\nUUID wajib 36 karakter (Contoh: a1b2c3d4-e5f6-7890-abcd-ef1234567890)."
+                        read -p "Tekan Enter..." dummy
+                        continue
+                    fi
+                else
+                    custom_uuid=$(python3 -c "import uuid; print(uuid.uuid4())")
+                fi
                 jq --arg u "$target" --arg id "$custom_uuid" '(.inbounds[0].settings.clients[] | select(.email == $u)).id = $id | (.inbounds[1].settings.clients[] | select(.email == $u)).id = $id' "$CONFIG_FILE" > /tmp/c.json && mv /tmp/c.json "$CONFIG_FILE"
                 jq --arg u "$target" --arg id "$custom_uuid" '.[$u].uuid = $id' "$USERS_FILE" > /tmp/u.json && mv /tmp/u.json "$USERS_FILE"
                 restart_xray
@@ -1128,7 +1163,7 @@ EOF
 
 chmod +x /usr/local/bin/menu
 
-# 15. Nyalakan Semua Service Awal
+# 16. Nyalakan Semua Service Awal
 service nginx restart 2>/dev/null || /usr/sbin/nginx
 export XRAY_LOCATION_ASSET="/root/xray"
 nohup env XRAY_LOCATION_ASSET=/root/xray /root/xray/xray run -c /root/xray/config.json > /root/xray/xray.log 2>&1 &
@@ -1136,13 +1171,13 @@ echo "quick" > /root/xray/mode.txt
 nohup /root/cloudflared tunnel --url http://127.0.0.1:23333 --logfile /root/xray/quick_tunnel.log > /dev/null 2>&1 &
 nohup python3 /root/xray/bot_daemon.py > /root/xray/bot.log 2>&1 &
 pkill -f "api_service.py" 2>/dev/null
-fuser -k 23330/tcp 2>/dev/null
+fuser -k -9 23330/tcp 2>/dev/null
 nohup python3 /root/xray/api_service.py > /root/xray/api.log 2>&1 &
 
 sleep 2
 
 echo "=========================================================="
-if pgrep -f "/root/xray/xray" > /dev/null; then
+if pgrep -f "/root/xray/xray run" > /dev/null; then
     echo -e "🎉 STATUS XRAY: \033[1;32m[ AKTIF / BERJALAN ]\033[0m (VMess & VLESS)"
 else
     echo -e "❌ Xray Log Error: $(cat /root/xray/xray.log)"
