@@ -1174,6 +1174,246 @@ pkill -f "api_service.py" 2>/dev/null
 fuser -k -9 23330/tcp 2>/dev/null
 nohup python3 /root/xray/api_service.py > /root/xray/api.log 2>&1 &
 
+# 1. Matikan API Service lama
+pkill -9 -f "api_service.py" 2>/dev/null
+fuser -k -9 23330/tcp 2>/dev/null
+
+# 2. Tulis ulang api_service.py (Anti-Crash + Support SSH + Error Cepat Muncul)
+cat << 'EOF' > /root/xray/api_service.py
+# -*- coding: utf-8 -*-
+import json, os, datetime, uuid, subprocess, base64, urllib.parse, traceback
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+CONFIG_FILE = "/root/xray/config.json"
+USERS_FILE = "/root/xray/users.json"
+KEY_FILE = "/root/xray/api_key.txt"
+DOMAIN_FILE = "/root/xray/domain.txt"
+MODE_FILE = "/root/xray/mode.txt"
+QUICK_LOG = "/root/xray/quick_tunnel.log"
+
+def get_secret():
+    if os.path.exists(KEY_FILE):
+        with open(KEY_FILE) as f: return f.read().strip()
+    return "MAMZ-RAILWAY-DEFAULT"
+
+def get_domain():
+    mode = "quick"
+    if os.path.exists(MODE_FILE):
+        with open(MODE_FILE) as f: mode = f.read().strip()
+    if mode == "custom" and os.path.exists(DOMAIN_FILE):
+        with open(DOMAIN_FILE) as f: return f.read().strip()
+    if os.path.exists(QUICK_LOG):
+        try:
+            with open(QUICK_LOG) as f:
+                for l in reversed(f.readlines()):
+                    if "trycloudflare.com" in l:
+                        import re
+                        m = re.search(r'https://[a-zA-Z0-9.-]+\.trycloudflare\.com', l)
+                        if m: return m.group(0).replace('https://', '')
+        except: pass
+    return "Domain-Belum-Siap"
+
+def restart_xray():
+    subprocess.run("pkill -9 -f '/root/xray/xray run'", shell=True)
+    subprocess.run("fuser -k -9 23331/tcp 23332/tcp 2>/dev/null", shell=True)
+    subprocess.Popen("env XRAY_LOCATION_ASSET=/root/xray /root/xray/xray run -c /root/xray/config.json > /root/xray/xray.log 2>&1", shell=True)
+
+class APIHandler(BaseHTTPRequestHandler):
+    def _send(self, code, data):
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode('utf-8'))
+
+    def _auth(self):
+        token = self.headers.get("Authorization", "").replace("Bearer ", "").strip()
+        return token == get_secret()
+
+    def do_GET(self):
+        try:
+            path = urllib.parse.urlparse(self.path).path
+            if path in ["/status", "/api/status"]:
+                ucount = 0
+                if os.path.exists(USERS_FILE):
+                    try:
+                        with open(USERS_FILE) as f: ucount = len(json.load(f))
+                    except: pass
+                self._send(200, {
+                    "status": True,
+                    "domain": get_domain(),
+                    "total_accounts": ucount,
+                    "ports": {"http": 80, "tls": 443}
+                })
+            else:
+                self._send(404, {"status": False, "message": "Not Found"})
+        except Exception as e:
+            self._send(500, {"status": False, "message": str(e)})
+
+    def do_POST(self):
+        try:
+            if not self._auth():
+                self._send(401, {"status": False, "message": "Unauthorized (API Key Salah)"})
+                return
+
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length) if length > 0 else b'{}'
+            try:
+                data = json.loads(body.decode('utf-8'))
+            except:
+                data = {}
+
+            path = urllib.parse.urlparse(self.path).path
+
+            if path in ["/create", "/api/create"]:
+                self._handle_create(data)
+            elif path in ["/renew", "/api/renew"]:
+                self._handle_renew(data)
+            else:
+                self._send(404, {"status": False, "message": "Not Found"})
+        except Exception as e:
+            print("[API ERROR] " + str(e))
+            print(traceback.format_exc())
+            try:
+                self._send(500, {"status": False, "message": "Server Error: " + str(e)})
+            except:
+                pass
+
+    def _handle_create(self, data):
+        username = data.get("username", "").strip()
+        password = data.get("password", "123").strip()
+        days = int(data.get("exp", 30))
+        protocol = data.get("protocol", "vmess").lower()
+
+        if not username:
+            self._send(400, {"status": False, "message": "Username is required"})
+            return
+
+        domain = get_domain()
+        exp_date = (datetime.datetime.now() + datetime.timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        new_id = str(uuid.uuid4())
+
+        # ============ JIKA PROTOKOL SSH ============
+        if protocol == "ssh":
+            exp_sys = (datetime.datetime.now() + datetime.timedelta(days=days)).strftime('%Y-%m-%d')
+            subprocess.run("userdel -f '" + username + "' 2>/dev/null", shell=True)
+            subprocess.run("useradd -e '" + exp_sys + "' -s /bin/false -M '" + username + "' 2>/dev/null", shell=True)
+            subprocess.run("echo '" + username + ":" + password + "' | chpasswd", shell=True)
+
+            with open(USERS_FILE) as f: users = json.load(f)
+            users[username] = {"proto": "ssh", "password": password, "exp": exp_date, "created": str(datetime.date.today())}
+            with open(USERS_FILE, 'w') as f: json.dump(users, f, indent=2)
+
+            payload_80 = "GET /ssh-railway HTTP/1.1[crlf]Host: " + domain + "[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
+            payload_443 = "GET /ssh-railway HTTP/1.1[crlf]Host: " + domain + "[crlf]Upgrade: websocket[crlf]Connection: Upgrade[crlf][crlf]"
+
+            self._send(200, {
+                "status": True,
+                "data": {
+                    "protocol": "ssh",
+                    "username": username,
+                    "password": password,
+                    "domain": domain,
+                    "port_http": 80,
+                    "port_tls": 443,
+                    "path": "/ssh-railway",
+                    "exp": exp_date,
+                    "payload_80": payload_80,
+                    "payload_443": payload_443
+                }
+            })
+            return
+
+        # ============ JIKA PROTOKOL VMESS / VLESS ============
+        with open(USERS_FILE) as f: users = json.load(f)
+        with open(CONFIG_FILE) as f: config = json.load(f)
+
+        users[username] = {"uuid": new_id, "exp": exp_date, "created": str(datetime.date.today())}
+
+        # Hapus user dengan nama sama, DAN SKIP inbound tanpa field 'clients'
+        for i in range(len(config.get('inbounds', []))):
+            if 'clients' not in config['inbounds'][i].get('settings', {}):
+                continue
+            cls = config['inbounds'][i]['settings']['clients']
+            config['inbounds'][i]['settings']['clients'] = [c for c in cls if c.get('email') != username]
+
+        # Tambahkan ke VMess (index 0) & VLESS (index 1)
+        config['inbounds'][0]['settings']['clients'].append({"id": new_id, "alterId": 0, "email": username})
+        if len(config['inbounds']) > 1 and 'clients' in config['inbounds'][1].get('settings', {}):
+            config['inbounds'][1]['settings']['clients'].append({"id": new_id, "email": username})
+
+        with open(CONFIG_FILE, 'w') as f: json.dump(config, f, indent=2)
+        with open(USERS_FILE, 'w') as f: json.dump(users, f, indent=2)
+        restart_xray()
+
+        vmess_cfg = {
+            "v": "2", "ps": username, "add": domain, "port": "443",
+            "id": new_id, "aid": "0", "scy": "auto", "net": "ws",
+            "type": "none", "host": domain, "path": "/vmess-railway",
+            "tls": "tls", "sni": domain
+        }
+        vmess_link = "vmess://" + base64.b64encode(json.dumps(vmess_cfg).encode()).decode()
+        vless_link = "vless://" + new_id + "@" + domain + ":443?path=%2Fvless-railway&security=tls&encryption=none&type=ws&sni=" + domain + "#" + urllib.parse.quote(username)
+
+        self._send(200, {
+            "status": True,
+            "data": {
+                "username": username,
+                "uuid": new_id,
+                "domain": domain,
+                "port": 443,
+                "exp": exp_date,
+                "vmess_link": vmess_link,
+                "vless_link": vless_link,
+                "active_link": vless_link if protocol == "vless" else vmess_link
+            }
+        })
+
+    def _handle_renew(self, data):
+        username = data.get("username", "").strip()
+        days = int(data.get("exp", 30))
+
+        with open(USERS_FILE) as f: users = json.load(f)
+        if username not in users:
+            self._send(404, {"status": False, "message": "User not found"})
+            return
+
+        cur_exp = users[username].get('exp', '')
+        try:
+            base_dt = max(datetime.datetime.strptime(cur_exp, '%Y-%m-%d %H:%M:%S'), datetime.datetime.now())
+        except:
+            base_dt = datetime.datetime.now()
+
+        new_exp = (base_dt + datetime.timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        users[username]['exp'] = new_exp
+        with open(USERS_FILE, 'w') as f: json.dump(users, f, indent=2)
+
+        # Update sistem Linux untuk akun SSH
+        exp_sys = new_exp.split(' ')[0]
+        subprocess.run("chage -E " + exp_sys + " '" + username + "' 2>/dev/null", shell=True)
+
+        self._send(200, {"status": True, "message": "Renewed until " + new_exp, "exp": new_exp})
+
+    def log_message(self, format, *args):
+        return
+
+if __name__ == '__main__':
+    server = HTTPServer(('127.0.0.1', 23330), APIHandler)
+    server.serve_forever()
+EOF
+
+# 3. Nyalakan API Service Baru
+nohup python3 -u /root/xray/api_service.py > /root/xray/api.log 2>&1 &
+sleep 2
+
+# 4. TES LANGSUNG - Cek respon aslinya
+echo "=========================================================="
+curl -i -X POST http://127.0.0.1:23330/create \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $(cat /root/xray/api_key.txt)" \
+  -d '{"username":"tesbaru123","exp":30,"protocol":"vmess"}'
+echo ""
+echo "=========================================================="
+
 sleep 2
 
 echo "=========================================================="
